@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Mecanum Car</title>
+  <meta name="viewport" content="user-scalable=no">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      position: fixed;
+      width: 100%; height: 100%;
+      overflow: hidden;
+      overscroll-behavior: none;
+      background: #1a1a2e;
+      font-family: 'Gill Sans', 'Gill Sans MT', Calibri, 'Trebuchet MS', sans-serif;
+      color: #c8c8d8;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    h1 {
+      font-size: 1.4rem;
+      font-weight: 400;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: #e0e0f0;
+      padding: 12px 0 4px;
+    }
+
+    #status-bar {
+      font-size: 0.75rem;
+      color: #7878a0;
+      letter-spacing: 0.08em;
+      padding-bottom: 6px;
+    }
+
+    /* ── Joystick canvas ── */
+    #canvas {
+      display: block;
+      flex-shrink: 0;
+    }
+
+    /* ── Servo panel ── */
+    #servo-panel {
+      width: 100%;
+      max-width: 420px;
+      padding: 10px 24px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .servo-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .servo-label {
+      font-size: 0.78rem;
+      letter-spacing: 0.06em;
+      color: #9898c0;
+      min-width: 58px;
+      text-transform: uppercase;
+    }
+
+    .servo-slider {
+      flex: 1;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 4px;
+      border-radius: 2px;
+      background: #2e2e50;
+      outline: none;
+      cursor: pointer;
+    }
+
+    .servo-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #F08080;
+      border: 3px solid #1a1a2e;
+      box-shadow: 0 0 0 2px #F08080;
+      cursor: grab;
+    }
+
+    .servo-slider::-moz-range-thumb {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #F08080;
+      border: 3px solid #1a1a2e;
+      box-shadow: 0 0 0 2px #F08080;
+      cursor: grab;
+    }
+
+    .servo-slider:active::-webkit-slider-thumb { cursor: grabbing; }
+    .servo-slider:active::-moz-range-thumb     { cursor: grabbing; }
+
+    .servo-value {
+      font-size: 0.78rem;
+      color: #F6ABAB;
+      min-width: 34px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+  </style>
+</head>
+<body>
+  <h1>Mecanum Car</h1>
+
+  <div id="status-bar">
+    Speed: <span id="speed">0</span>%
+    &nbsp;·&nbsp;
+    Angle: <span id="angle">0</span>°
+    <span style="display:none">
+      X:<span id="x_coordinate">0</span>
+      Y:<span id="y_coordinate">0</span>
+    </span>
+  </div>
+
+  <canvas id="canvas"></canvas>
+
+  <!-- Servo sliders -->
+  <div id="servo-panel">
+
+    <div class="servo-row">
+      <span class="servo-label">Servo 1</span>
+      <input class="servo-slider" type="range" id="s1" min="0" max="180" value="90"
+             oninput="onServo(1, this.value)">
+      <span class="servo-value" id="s1-val">90°</span>
+    </div>
+
+    <div class="servo-row">
+      <span class="servo-label">Servo 2</span>
+      <input class="servo-slider" type="range" id="s2" min="0" max="180" value="90"
+             oninput="onServo(2, this.value)">
+      <span class="servo-value" id="s2-val">90°</span>
+    </div>
+
+    <div class="servo-row">
+      <span class="servo-label">Servo 3</span>
+      <input class="servo-slider" type="range" id="s3" min="0" max="180" value="90"
+             oninput="onServo(3, this.value)">
+      <span class="servo-value" id="s3-val">90°</span>
+    </div>
+
+  </div>
+
+  <script>
+    /* ── WebSocket ── */
+    var connection = new WebSocket('ws://192.168.4.1:81/', ['arduino']);
+    connection.onopen  = function () { connection.send('Connect ' + new Date()); };
+    connection.onerror = function (e) { console.log('WebSocket Error', e); };
+    connection.onmessage = function (e) { console.log('Server:', e.data); };
+
+    /* Current servo positions (kept in JS so every send includes all values) */
+    var servoVals = { s1: 90, s2: 90, s3: 90 };
+
+    function send(x, y, speed, angle) {
+      var data = {
+        x: x, y: y, speed: speed, angle: angle,
+        s1: servoVals.s1,
+        s2: servoVals.s2,
+        s3: servoVals.s3
+      };
+      connection.send(JSON.stringify(data));
+    }
+
+    function onServo(num, val) {
+      val = parseInt(val);
+      servoVals['s' + num] = val;
+      document.getElementById('s' + num + '-val').textContent = val + '°';
+      /* Send a servo-only packet (motors stay at zero if joystick not active) */
+      if (connection.readyState === WebSocket.OPEN) {
+        connection.send(JSON.stringify({ x: 0, y: 0, speed: 0, angle: 0,
+          s1: servoVals.s1, s2: servoVals.s2, s3: servoVals.s3 }));
+      }
+    }
+
+    /* ── Canvas / Joystick ── */
+    var canvas, ctx;
+    var width, height, radius, x_orig, y_orig;
+    var coord = { x: 0, y: 0 };
+    var paint = false;
+
+    window.addEventListener('load', () => {
+      canvas = document.getElementById('canvas');
+      ctx    = canvas.getContext('2d');
+      resize();
+
+      document.addEventListener('mousedown',   startDrawing);
+      document.addEventListener('mouseup',     stopDrawing);
+      document.addEventListener('mousemove',   Draw);
+      document.addEventListener('touchstart',  startDrawing, { passive: false });
+      document.addEventListener('touchend',    stopDrawing);
+      document.addEventListener('touchcancel', stopDrawing);
+      document.addEventListener('touchmove',   Draw, { passive: false });
+      window.addEventListener('resize', resize);
+    });
+
+    function resize() {
+      width  = window.innerWidth;
+      radius = Math.min(100, width * 0.22);
+      /* Leave room for h1 + status (~64px) + servo panel (~130px) */
+      height = window.innerHeight - 64 - 130;
+      height = Math.max(height, radius * 3);
+      ctx.canvas.width  = width;
+      ctx.canvas.height = height;
+      background();
+      joystick(width / 2, height / 2);
+    }
+
+    function background() {
+      x_orig = width / 2;
+      y_orig = height / 2;
+      ctx.beginPath();
+      ctx.arc(x_orig, y_orig, radius + 20, 0, Math.PI * 2, true);
+      ctx.fillStyle = '#2e2e50';
+      ctx.fill();
+    }
+
+    function joystick(w, h) {
+      ctx.beginPath();
+      ctx.arc(w, h, radius, 0, Math.PI * 2, true);
+      ctx.fillStyle = '#F08080';
+      ctx.fill();
+      ctx.strokeStyle = '#F6ABAB';
+      ctx.lineWidth = 8;
+      ctx.stroke();
+    }
+
+    function getPosition(event) {
+      var src = event.touches ? event.touches[0] : event;
+      coord.x = src.clientX - canvas.offsetLeft;
+      coord.y = src.clientY - canvas.offsetTop;
+    }
+
+    function is_it_in_the_circle() {
+      return Math.sqrt(Math.pow(coord.x - x_orig, 2) + Math.pow(coord.y - y_orig, 2)) <= radius;
+    }
+
+    function isInServoPanel(event) {
+      var panel = document.getElementById('servo-panel');
+      var rect  = panel.getBoundingClientRect();
+      var src   = event.touches ? event.touches[0] : event;
+      /* Add 20 px padding above the panel as a buffer zone */
+      return src.clientY >= rect.top - 20;
+    }
+
+    function startDrawing(event) {
+      /* Ignore anything that starts inside or near the servo panel */
+      if (isInServoPanel(event)) return;
+      paint = true;
+      getPosition(event);
+      if (is_it_in_the_circle()) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        background();
+        joystick(coord.x, coord.y);
+        Draw(event);
+      }
+    }
+
+    function stopDrawing() {
+      paint = false;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      background();
+      joystick(width / 2, height / 2);
+      document.getElementById('x_coordinate').innerText = 0;
+      document.getElementById('y_coordinate').innerText = 0;
+      document.getElementById('speed').innerText = 0;
+      document.getElementById('angle').innerText = 0;
+      send(0, 0, 0, 0);
+    }
+
+    const scale = (n, [iMin, iMax], [oMin, oMax]) =>
+      (n - iMin) / (iMax - iMin) * (oMax - oMin) + oMin;
+
+    function Draw(event) {
+      if (!paint) return;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      background();
+
+      var angle = Math.atan2(coord.y - y_orig, coord.x - x_orig);
+      var angle_in_degrees = Math.sign(angle) === -1
+        ? Math.round(-angle * 180 / Math.PI)
+        : Math.round(360 - angle * 180 / Math.PI);
+
+      var x, y;
+      if (is_it_in_the_circle()) {
+        x = coord.x; y = coord.y;
+        joystick(coord.x, coord.y);
+      } else {
+        x = radius * Math.cos(angle) + x_orig;
+        y = radius * Math.sin(angle) + y_orig;
+        joystick(x, y);
+      }
+
+      getPosition(event);
+
+      var speed      = Math.round(100 * Math.sqrt(Math.pow(x - x_orig, 2) + Math.pow(y - y_orig, 2)) / radius);
+      var x_relative = Math.round(x - x_orig);
+      var y_relative = -Math.round(y - y_orig);
+
+      document.getElementById('x_coordinate').innerText = x_relative;
+      document.getElementById('y_coordinate').innerText = y_relative;
+      document.getElementById('speed').innerText = speed;
+      document.getElementById('angle').innerText = angle_in_degrees;
+
+      send(x_relative / 200, y_relative / 200,
+           scale(speed, [0, 100], [180, 250]),
+           angle_in_degrees);
+    }
+  </script>
+</body>
+</html>
